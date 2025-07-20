@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, PermissionFlagsBits, ActivityType } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -17,7 +17,7 @@ class VIPRainbowBot {
         // Configuration
         this.prefix = process.env.BOT_PREFIX || '!';
         this.commandName = process.env.COMMAND_NAME || 'vipname';
-        this.rotationInterval = parseInt(process.env.ROTATION_INTERVAL) || 2000; // 2 seconds
+        this.rotationInterval = parseInt(process.env.ROTATION_INTERVAL) || 5000; // 5 seconds for better stability
         this.maxVipUsers = parseInt(process.env.MAX_VIP_USERS) || 50;
         this.ownerId = process.env.BOT_OWNER_ID;
 
@@ -30,7 +30,6 @@ class VIPRainbowBot {
         this.vipUsers = new Map(); // guildId -> Set of userIds
         this.guildSettings = new Map(); // guildId -> { colorRoles: [], currentIndex: Map }
         this.rotationTimers = new Map(); // guildId -> interval timer
-        this.currentRoleIndex = new Map(); // guildId -> Map(userId -> currentColorIndex)
 
         // Default color roles to create
         this.defaultColors = [
@@ -121,7 +120,7 @@ class VIPRainbowBot {
         console.log(`📊 Serving ${this.client.guilds.cache.size} guilds`);
 
         // Set bot status
-        this.client.user.setActivity('VIP Rainbow Names 🌈', { type: 'WATCHING' });
+        this.client.user.setActivity('VIP Rainbow Names 🌈', { type: ActivityType.Watching });
 
         // Initialize all guilds
         for (const guild of this.client.guilds.cache.values()) {
@@ -163,6 +162,7 @@ class VIPRainbowBot {
         }
 
         let rolesCreated = 0;
+        const validRoles = [];
         
         for (const colorConfig of this.defaultColors) {
             // Check if role already exists
@@ -187,11 +187,14 @@ class VIPRainbowBot {
                 }
             }
 
-            // Add to our tracking if not already there
-            if (!existingRoles.has(role.id)) {
-                settings.colorRoles.push(role.id);
+            // Add to valid roles list
+            if (role) {
+                validRoles.push(role.id);
             }
         }
+
+        // Update settings with only valid roles
+        settings.colorRoles = validRoles;
 
         if (rolesCreated > 0) {
             console.log(`🎨 Created ${rolesCreated} color roles in ${guild.name}`);
@@ -369,12 +372,32 @@ class VIPRainbowBot {
         const guild = this.client.guilds.cache.get(guildId);
         if (!guild) return;
 
-        // Rotate colors for each VIP user
-        for (const userId of vipSet) {
+        // Convert to array for staggered processing
+        const vipUsers = Array.from(vipSet);
+        
+        // Rotate colors with small delays to avoid rate limits
+        for (let i = 0; i < vipUsers.length; i++) {
+            const userId = vipUsers[i];
+            
+            // Add a progressive delay between each user (200ms per user)
+            if (i > 0) {
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+            
             try {
                 const member = await guild.members.fetch(userId).catch(() => null);
                 if (member) {
                     await this.rotateUserColor(member, guildId);
+                } else {
+                    // User not found, remove from VIP list
+                    console.warn(`⚠️ User ${userId} not found in ${guild.name}, removing from VIP list`);
+                    vipSet.delete(userId);
+                    
+                    const settings = this.guildSettings.get(guildId);
+                    if (settings) {
+                        settings.currentIndex.delete(userId);
+                    }
+                    this.saveData();
                 }
             } catch (error) {
                 console.error(`Error rotating color for user ${userId}:`, error);
@@ -387,21 +410,47 @@ class VIPRainbowBot {
         if (!settings || !settings.colorRoles.length) return;
 
         try {
+            // Validate that roles still exist
+            const validRoles = settings.colorRoles.filter(roleId => 
+                member.guild.roles.cache.has(roleId)
+            );
+
+            if (validRoles.length === 0) {
+                console.warn(`⚠️ No valid color roles found for ${member.guild.name}`);
+                return;
+            }
+
+            // Update valid roles if some were removed
+            if (validRoles.length !== settings.colorRoles.length) {
+                settings.colorRoles = validRoles;
+                this.saveData();
+            }
+
             // Get current color index for this user
             let currentIndex = settings.currentIndex.get(member.id) || 0;
             
-            // Remove current color role
-            const currentRoleId = settings.colorRoles[currentIndex];
-            if (member.roles.cache.has(currentRoleId)) {
-                await member.roles.remove(currentRoleId, 'VIP Rainbow Bot - Color rotation');
+            // Ensure index is within bounds
+            if (currentIndex >= validRoles.length) {
+                currentIndex = 0;
+            }
+
+            // CRITICAL FIX: Remove ALL VIP color roles first to prevent multiple roles
+            const allVipRoles = settings.colorRoles.filter(roleId => 
+                member.roles.cache.has(roleId)
+            );
+            
+            if (allVipRoles.length > 0) {
+                await member.roles.remove(allVipRoles, 'VIP Rainbow Bot - Color rotation cleanup');
+                // Add small delay to prevent race conditions
+                await new Promise(resolve => setTimeout(resolve, 50));
             }
 
             // Move to next color
-            currentIndex = (currentIndex + 1) % settings.colorRoles.length;
+            currentIndex = (currentIndex + 1) % validRoles.length;
             settings.currentIndex.set(member.id, currentIndex);
 
-            // Add new color role
-            const newRoleId = settings.colorRoles[currentIndex];
+            // Add ONLY the new color role
+            const newRoleId = validRoles[currentIndex];
             const newRole = member.guild.roles.cache.get(newRoleId);
             
             if (newRole) {
@@ -410,6 +459,11 @@ class VIPRainbowBot {
 
         } catch (error) {
             console.error(`Error rotating color for ${member.displayName}:`, error);
+            
+            // If it's a permissions error, warn about it
+            if (error.code === 50013) {
+                console.warn(`⚠️ Missing permissions to manage roles for ${member.displayName} in ${member.guild.name}`);
+            }
         }
     }
 
