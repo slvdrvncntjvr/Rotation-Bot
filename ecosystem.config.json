@@ -1,0 +1,29 @@
+{
+  "apps": [
+    {
+      "name": "vip-rainbow-bot",
+      "script": "index.js",
+      "instances": 1,
+      "exec_mode": "fork",
+      "max_memory_restart": "512M",
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "log_file": "./logs/pm2.log",
+      "out_file": "./logs/pm2-out.log",
+      "error_file": "./logs/pm2-error.log",
+      "log_date_format": "YYYY-MM-DD HH:mm:ss",
+      "merge_logs": true,
+      "restart_delay": 5000,
+      "max_restarts": 10,
+      "min_uptime": "10s",
+      "autorestart": true,
+      "watch": false,
+      "ignore_watch": [
+        "node_modules",
+        "logs",
+        "data"
+      ]
+    }
+  ]
+}
